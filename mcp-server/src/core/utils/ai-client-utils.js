@@ -9,9 +9,13 @@ import dotenv from 'dotenv';
 // Load environment variables for CLI mode
 dotenv.config();
 
+// 确定默认的LLM提供商
+const defaultLlmProvider = process.env.LLM_PROVIDER || 'anthropic';
+
 // Default model configuration from CLI environment
 const DEFAULT_MODEL_CONFIG = {
-	model: 'claude-3-7-sonnet-20250219',
+	llmProvider: defaultLlmProvider,
+	anthropicModel: process.env.ANTHROPIC_MODEL || 'claude-3-7-sonnet-20250219',
 	deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
 	perplexityModel: process.env.PERPLEXITY_MODEL || 'sonar-pro',
 	maxTokens: 64000,
@@ -123,9 +127,23 @@ export async function getDeepSeekClientForMCP(session, log = console) {
  * @returns {Object} Model configuration with model, maxTokens, and temperature
  */
 export function getModelConfig(session, defaults = DEFAULT_MODEL_CONFIG) {
+	// 获取LLM提供商设置
+	const llmProvider = session?.env?.LLM_PROVIDER || defaults.llmProvider;
+	
+	// 根据提供商选择对应的模型
+	let model;
+	if (llmProvider === 'deepseek') {
+		model = session?.env?.DEEPSEEK_MODEL || defaults.deepseekModel;
+	}  else {
+		// 默认使用Anthropic/Claude
+		model = session?.env?.ANTHROPIC_MODEL || defaults.anthropicModel;
+	}
+	
 	// Get values from session or fall back to defaults
 	return {
-		model: session?.env?.MODEL || defaults.model,
+		llmProvider,
+		model, // 根据提供商选择的主要模型
+		anthropicModel: session?.env?.ANTHROPIC_MODEL || defaults.anthropicModel,
 		deepseekModel: session?.env?.DEEPSEEK_MODEL || defaults.deepseekModel,
 		perplexityModel: session?.env?.PERPLEXITY_MODEL || defaults.perplexityModel,
 		maxTokens: parseInt(session?.env?.MAX_TOKENS || defaults.maxTokens),
@@ -149,111 +167,106 @@ export async function getBestAvailableAIModel(
 	log = console
 ) {
 	const { requiresResearch = false, claudeOverloaded = false } = options;
-
-	// Case 1: When research is needed but no Perplexity, use Claude
-	if (
-		requiresResearch &&
-		!(session?.env?.PERPLEXITY_API_KEY || process.env.PERPLEXITY_API_KEY) &&
-		(session?.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY)
-	) {
+	
+	// 获取用户指定的LLM提供商
+	const modelConfig = getModelConfig(session);
+	const preferredProvider = modelConfig.llmProvider;
+	
+	log.info(`首选LLM提供商: ${preferredProvider}`);
+	
+	// 特殊情况：研究操作优先使用Perplexity（如果可用）
+	if (requiresResearch && (session?.env?.PERPLEXITY_API_KEY || process.env.PERPLEXITY_API_KEY)) {
 		try {
-			log.warn('Perplexity not available for research, using Claude');
-			const client = getAnthropicClientForMCP(session, log);
-			return { type: 'claude', client };
-		} catch (error) {
-			log.error(`Claude not available: ${error.message}`);
-			
-			// Try DeepSeek as last resort for research
-			if (session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY) {
-				try {
-					log.warn('Trying DeepSeek for research as last resort');
-					const client = await getDeepSeekClientForMCP(session, log);
-					return { type: 'deepseek', client };
-				} catch (deepseekError) {
-					log.error(`DeepSeek not available: ${deepseekError.message}`);
-				}
-			}
-			
-			throw new Error('No AI models available for research');
-		}
-	}
-
-	// Case 2: Regular path - Perplexity for research when available
-	if (
-		requiresResearch &&
-		(session?.env?.PERPLEXITY_API_KEY || process.env.PERPLEXITY_API_KEY)
-	) {
-		try {
+			log.info('研究操作使用Perplexity');
 			const client = await getPerplexityClientForMCP(session, log);
 			return { type: 'perplexity', client };
 		} catch (error) {
-			log.warn(`Perplexity not available: ${error.message}`);
-			// Fall through to Claude or DeepSeek as backup
-		}
-	}
-
-	// Case 3: Claude is overloaded, try DeepSeek
-	if (
-		claudeOverloaded &&
-		(session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY)
-	) {
-		try {
-			log.info('Claude is overloaded, trying DeepSeek');
-			const client = await getDeepSeekClientForMCP(session, log);
-			return { type: 'deepseek', client };
-		} catch (error) {
-			log.warn(`DeepSeek not available: ${error.message}`);
-			// Fall through to check other options
-		}
-	}
-
-	// Case 4: Claude for overloaded scenario as last resort
-	if (
-		claudeOverloaded &&
-		(session?.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY)
-	) {
-		try {
-			log.warn(
-				'Claude is overloaded but no alternatives are available. Proceeding with Claude anyway.'
-			);
-			const client = getAnthropicClientForMCP(session, log);
-			return { type: 'claude', client };
-		} catch (error) {
-			log.error(
-				`Claude not available despite being overloaded: ${error.message}`
-			);
-			throw new Error('No AI models available');
-		}
-	}
-
-	// Case 5: Default - Use Claude when available and not overloaded
-	if (
-		!claudeOverloaded &&
-		(session?.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY)
-	) {
-		try {
-			const client = getAnthropicClientForMCP(session, log);
-			return { type: 'claude', client };
-		} catch (error) {
-			log.warn(`Claude not available: ${error.message}`);
-			// Fall through to try DeepSeek
+			log.warn(`Perplexity不可用: ${error.message}`);
+			// 继续尝试其他模型
 		}
 	}
 	
-	// Case 6: DeepSeek as fallback when Claude is not available
-	if (session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY) {
+	// 按用户偏好尝试选择模型
+	// 1. DeepSeek优先
+	if (preferredProvider === 'deepseek') {
+		if (session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY) {
+			try {
+				log.info('使用用户首选的DeepSeek');
+				const client = await getDeepSeekClientForMCP(session, log);
+				return { type: 'deepseek', client };
+			} catch (error) {
+				log.warn(`DeepSeek不可用: ${error.message}`);
+				// 继续尝试其他备选
+			}
+		} else {
+			log.warn('用户首选DeepSeek但缺少DEEPSEEK_API_KEY');
+		}
+	}
+	
+	// 2. Anthropic/Claude优先
+	if (preferredProvider === 'anthropic' && !claudeOverloaded) {
+		if (session?.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY) {
+			try {
+				log.info('使用用户首选的Claude');
+				const client = getAnthropicClientForMCP(session, log);
+				return { type: 'claude', client };
+			} catch (error) {
+				log.warn(`Claude不可用: ${error.message}`);
+				// 继续尝试备选
+			}
+		} else {
+			log.warn('用户首选Claude但缺少ANTHROPIC_API_KEY');
+		}
+	}
+	
+	// 备选方案：如果首选提供商不可用或出现特殊情况（如Claude过载）
+	
+	// 1. Claude过载 -> 尝试DeepSeek
+	if (claudeOverloaded && (session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY)) {
 		try {
-			log.info('Claude not available, using DeepSeek');
+			log.info('Claude过载，尝试DeepSeek作为替代');
 			const client = await getDeepSeekClientForMCP(session, log);
 			return { type: 'deepseek', client };
 		} catch (error) {
-			log.error(`DeepSeek not available: ${error.message}`);
-			// Fall through to error
+			log.warn(`DeepSeek备选不可用: ${error.message}`);
+		}
+	}
+	
+	// 2. 如果DeepSeek是首选但不可用 -> 尝试Claude
+	if (preferredProvider === 'deepseek' && (session?.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY)) {
+		try {
+			log.info('DeepSeek不可用，回退到Claude');
+			const client = getAnthropicClientForMCP(session, log);
+			return { type: 'claude', client };
+		} catch (error) {
+			log.warn(`Claude备选不可用: ${error.message}`);
+		}
+	}
+	
+	// 3. 如果Claude是首选但不可用/过载 -> 尝试DeepSeek
+	if (preferredProvider === 'anthropic' && (session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY)) {
+		try {
+			log.info('Claude不可用或过载，回退到DeepSeek');
+			const client = await getDeepSeekClientForMCP(session, log);
+			return { type: 'deepseek', client };
+		} catch (error) {
+			log.warn(`DeepSeek备选不可用: ${error.message}`);
+		}
+	}
+	
+	// 4. 紧急情况：Claude过载但没有备选 -> 还是用Claude
+	if (claudeOverloaded && (session?.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY)) {
+		try {
+			log.warn('Claude过载但无替代方案可用，仍使用Claude');
+			const client = getAnthropicClientForMCP(session, log);
+			return { type: 'claude', client };
+		} catch (error) {
+			log.error(`Claude最终尝试失败: ${error.message}`);
 		}
 	}
 
-	// If we got here, no models were successfully initialized
-	throw new Error('No AI models available. Please check your API keys.');
+	// 如果无法初始化任何模型
+	throw new Error('无可用的AI模型。请检查您的API密钥和LLM_PROVIDER设置。');
 }
 
 /**

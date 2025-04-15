@@ -185,7 +185,22 @@ export class ClaudeAdapter extends ModelAdapter {
    * @returns {number} 优先级值
    */
   getPriority(options = {}) {
-    // Claude通常是首选，除非过载
+    // 首先检查LLM_PROVIDER设置
+    const llmProvider = process.env.LLM_PROVIDER || 'anthropic';
+    
+    // 如果用户明确指定使用Claude
+    if (llmProvider === 'anthropic') {
+      // Claude是明确指定的首选，但如果过载则降低优先级
+      return options.claudeOverloaded ? 70 : 100;
+    }
+    
+    // 如果用户指定了其他提供商，Claude作为备选
+    if (llmProvider === 'deepseek') {
+      // 当其他提供商被指定为首选时，Claude是备选，除非过载
+      return options.claudeOverloaded ? -10 : 50;
+    }
+    
+    // 默认行为：Claude通常是首选，除非过载
     return options.claudeOverloaded ? -10 : 100;
   }
 } 

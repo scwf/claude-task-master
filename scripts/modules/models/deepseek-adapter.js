@@ -187,8 +187,22 @@ export class DeepSeekAdapter extends ModelAdapter {
    * @returns {number} 优先级值
    */
   getPriority(options = {}) {
-    // DeepSeek是备选模型，优先级中等
-    // 当Claude过载时，优先级提高
+    // 首先检查LLM_PROVIDER设置
+    const llmProvider = process.env.LLM_PROVIDER || 'anthropic';
+    
+    // 如果用户明确指定使用DeepSeek
+    if (llmProvider === 'deepseek') {
+      // DeepSeek是明确指定的首选
+      return 100;
+    }
+    
+    // 如果用户指定了其他提供商，DeepSeek作为备选
+    if (llmProvider === 'anthropic') {
+      // 当Claude过载时，DeepSeek优先级提高
+      return options.claudeOverloaded ? 80 : 50;
+    }
+    
+    // 默认行为：DeepSeek是备选模型
     return options.claudeOverloaded ? 80 : 50;
   }
 } 
