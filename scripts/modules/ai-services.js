@@ -12,6 +12,9 @@ import { CONFIG, log, sanitizePrompt, isSilentMode } from './utils.js';
 import { startLoadingIndicator, stopLoadingIndicator } from './ui.js';
 import chalk from 'chalk';
 
+// 导入新的模型框架
+import { modelRegistry, processModelResponse } from './models/index.js';
+
 // Load environment variables
 dotenv.config();
 
@@ -138,7 +141,7 @@ function handleClaudeError(error) {
 }
 
 /**
- * Call Claude to generate tasks from a PRD
+ * Call an AI model to generate tasks from a PRD
  * @param {string} prdContent - PRD content
  * @param {string} prdPath - Path to the PRD file
  * @param {number} numTasks - Number of tasks to generate
@@ -149,9 +152,9 @@ function handleClaudeError(error) {
  *   - session: Session object from MCP server (optional)
  * @param {Object} aiClient - AI client instance (optional - will use default if not provided)
  * @param {Object} modelConfig - Model configuration (optional)
- * @returns {Object} Claude's response
+ * @returns {Object} AI model's response
  */
-async function callClaude(
+async function callAIModel(
 	prdContent,
 	prdPath,
 	numTasks,
@@ -161,7 +164,7 @@ async function callClaude(
 	modelConfig = null
 ) {
 	try {
-		log('info', 'Calling Claude...');
+		log('info', '调用AI模型...');
 
 		// Build the system prompt
 		const systemPrompt = `You are an AI assistant helping to break down a Product Requirements Document (PRD) into a set of sequential development tasks. 
@@ -198,69 +201,122 @@ Expected output format:
     {
       "id": 1,
       "title": "Setup Project Repository",
-      "description": "...",
-      ...
+      "description": "Initialize the repository with basic project structure and dependencies",
+      "status": "pending",
+      "dependencies": [],
+      "priority": "high",
+      "details": "Create a new repository, initialize with package.json, add README with project overview...",
+      "testStrategy": "Verify repository structure and ensure all initial files are present"
     },
-    ...
-  ],
-  "metadata": {
-    "projectName": "PRD Implementation",
-    "totalTasks": ${numTasks},
-    "sourceFile": "${prdPath}",
-    "generatedAt": "YYYY-MM-DD"
-  }
+    ...more tasks...
+  ]
 }
 
-Important: Your response must be valid JSON only, with no additional explanation or comments.`;
+Return ONLY valid JSON in the above format with no additional text, explanation, or markdown formatting.`;
 
-		// Use streaming request to handle large responses and show progress
-		return await handleStreamingRequest(
-			prdContent,
-			prdPath,
-			numTasks,
-			modelConfig?.maxTokens || CONFIG.maxTokens,
-			systemPrompt,
-			{ reportProgress, mcpLog, session },
-			aiClient || anthropic,
-			modelConfig
-		);
-	} catch (error) {
-		// Get user-friendly error message
-		const userMessage = handleClaudeError(error);
-		log('error', userMessage);
+		// 处理不同的调用情况
+		let modelType = 'unknown';
+		let adapter = null;
+		let result = null;
 
-		// Retry logic for certain errors
-		if (
-			retryCount < 2 &&
-			(error.error?.type === 'overloaded_error' ||
-				error.error?.type === 'rate_limit_error' ||
-				error.message?.toLowerCase().includes('timeout') ||
-				error.message?.toLowerCase().includes('network'))
-		) {
-			const waitTime = (retryCount + 1) * 5000; // 5s, then 10s
-			log(
-				'info',
-				`Waiting ${waitTime / 1000} seconds before retry ${retryCount + 1}/2...`
+		// 如果提供了客户端实例
+		if (aiClient) {
+			// 确定模型类型
+			modelType = modelRegistry.determineModelType(aiClient);
+			adapter = modelRegistry.getAdapter(modelType);
+			
+			if (adapter) {
+				log('info', `使用提供的${modelType}客户端`);
+			} else {
+				log('warn', `提供的客户端类型(${modelType})没有对应的适配器，使用默认处理`);
+			}
+		} else {
+			// 没有提供客户端，选择最佳可用模型
+			try {
+				const selectedModel = await modelRegistry.selectBestModel(session, { 
+					claudeOverloaded: false,
+					requiresResearch: false
+				});
+				
+				modelType = selectedModel.type;
+				adapter = selectedModel.adapter;
+				aiClient = selectedModel.client;
+				
+				log('info', `选择最佳可用模型: ${modelType}`);
+			} catch (error) {
+				log('error', `选择模型失败: ${error.message}`);
+				throw new Error(`无法选择可用的AI模型: ${error.message}`);
+			}
+		}
+		
+		// 使用适配器调用模型
+		if (adapter) {
+			result = await adapter.callModel(
+				{
+					prdContent,
+					prdPath,
+					numTasks,
+					systemPrompt,
+					retryCount
+				},
+				{
+					reportProgress,
+					mcpLog,
+					session,
+					modelConfig
+				}
 			);
-			await new Promise((resolve) => setTimeout(resolve, waitTime));
-			return await callClaude(
+		} else {
+			// 没有适配器，使用旧的处理逻辑（为了兼容性）
+			log('warn', '没有找到适配器，使用旧的处理逻辑');
+			throw new Error('没有可用的模型适配器');
+		}
+		
+		// 处理模型响应
+		const processed = processModelResponse(result, {
+			numTasks,
+			reportProgress,
+			mcpLog
+		});
+		
+		// 如果需要重试
+		if (processed.shouldRetry) {
+			return callAIModel(
 				prdContent,
 				prdPath,
 				numTasks,
-				retryCount + 1,
+				processed.retryCount,
 				{ reportProgress, mcpLog, session },
 				aiClient,
 				modelConfig
 			);
-		} else {
-			console.error(chalk.red(userMessage));
-			if (CONFIG.debug) {
-				log('debug', 'Full error:', error);
-			}
-			throw new Error(userMessage);
 		}
+		
+		return processed.tasks;
+	} catch (error) {
+		log('error', `调用AI模型失败: ${error.message}`);
+		
+		// 如果是适配器已知的错误，可能会有更友好的错误消息
+		if (error.adapterError) {
+			throw new Error(error.message);
+		}
+		
+		// 通用错误处理
+		let errorMessage = `生成任务失败: ${error.message}`;
+		
+		// 检查是否是常见的API错误
+		if (error.status === 429) {
+			errorMessage = '请求过于频繁，请稍后再试。';
+		} else if (error.status >= 500) {
+			errorMessage = 'AI服务器暂时不可用，请稍后再试。';
+		}
+		
+		throw new Error(errorMessage);
 	}
 }
+
+// 为向后兼容性保留旧的函数名
+const callClaude = callAIModel;
 
 /**
  * Handle streaming request to Claude

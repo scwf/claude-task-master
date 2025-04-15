@@ -10,9 +10,15 @@ import chalk from 'chalk';
 // Global silent mode flag
 let silentMode = false;
 
+// 确定使用哪个模型提供商
+const llmProvider = process.env.LLM_PROVIDER || 'anthropic';
+
 // Configuration and constants
 const CONFIG = {
-	model: process.env.MODEL || 'claude-3-7-sonnet-20250219',
+	// 根据LLM提供商选择适当的模型
+	model: llmProvider === 'deepseek' 
+		? (process.env.DEEPSEEK_MODEL || 'deepseek-chat')
+		: (process.env.ANTHROPIC_MODEL || 'claude-3-7-sonnet-20250219'),
 	maxTokens: parseInt(process.env.MAX_TOKENS || '4000'),
 	temperature: parseFloat(process.env.TEMPERATURE || '0.7'),
 	debug: process.env.DEBUG === 'true',
@@ -20,7 +26,8 @@ const CONFIG = {
 	defaultSubtasks: parseInt(process.env.DEFAULT_SUBTASKS || '3'),
 	defaultPriority: process.env.DEFAULT_PRIORITY || 'medium',
 	projectName: process.env.PROJECT_NAME || 'Task Master',
-	projectVersion: '1.5.0' // Hardcoded version - ALWAYS use this value, ignore environment variable
+	projectVersion: '1.5.0', // Hardcoded version - ALWAYS use this value, ignore environment variable
+	llmProvider: llmProvider // 添加LLM提供商到CONFIG中方便其他地方使用
 };
 
 // Set up logging based on log level

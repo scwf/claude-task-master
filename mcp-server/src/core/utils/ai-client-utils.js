@@ -12,6 +12,8 @@ dotenv.config();
 // Default model configuration from CLI environment
 const DEFAULT_MODEL_CONFIG = {
 	model: 'claude-3-7-sonnet-20250219',
+	deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+	perplexityModel: process.env.PERPLEXITY_MODEL || 'sonar-pro',
 	maxTokens: 64000,
 	temperature: 0.2
 };
@@ -82,6 +84,39 @@ export async function getPerplexityClientForMCP(session, log = console) {
 }
 
 /**
+ * Get a DeepSeek client instance initialized with MCP session environment variables
+ * @param {Object} [session] - Session object from MCP containing environment variables
+ * @param {Object} [log] - Logger object to use (defaults to console)
+ * @returns {OpenAI} OpenAI client configured for DeepSeek API
+ * @throws {Error} If API key is missing or OpenAI package can't be imported
+ */
+export async function getDeepSeekClientForMCP(session, log = console) {
+	try {
+		// Extract API key from session.env or fall back to environment variables
+		const apiKey =
+			session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY;
+
+		if (!apiKey) {
+			throw new Error(
+				'DEEPSEEK_API_KEY not found in session environment or process.env'
+			);
+		}
+
+		// Dynamically import OpenAI (it may not be used in all contexts)
+		const { default: OpenAI } = await import('openai');
+
+		// Initialize and return a new OpenAI client configured for DeepSeek
+		return new OpenAI({
+			apiKey,
+			baseURL: 'https://api.deepseek.com'
+		});
+	} catch (error) {
+		log.error(`Failed to initialize DeepSeek client: ${error.message}`);
+		throw error;
+	}
+}
+
+/**
  * Get model configuration from session environment or fall back to defaults
  * @param {Object} [session] - Session object from MCP containing environment variables
  * @param {Object} [defaults] - Default model configuration to use if not in session
@@ -91,6 +126,8 @@ export function getModelConfig(session, defaults = DEFAULT_MODEL_CONFIG) {
 	// Get values from session or fall back to defaults
 	return {
 		model: session?.env?.MODEL || defaults.model,
+		deepseekModel: session?.env?.DEEPSEEK_MODEL || defaults.deepseekModel,
+		perplexityModel: session?.env?.PERPLEXITY_MODEL || defaults.perplexityModel,
 		maxTokens: parseInt(session?.env?.MAX_TOKENS || defaults.maxTokens),
 		temperature: parseFloat(session?.env?.TEMPERATURE || defaults.temperature)
 	};
@@ -113,7 +150,7 @@ export async function getBestAvailableAIModel(
 ) {
 	const { requiresResearch = false, claudeOverloaded = false } = options;
 
-	// Test case: When research is needed but no Perplexity, use Claude
+	// Case 1: When research is needed but no Perplexity, use Claude
 	if (
 		requiresResearch &&
 		!(session?.env?.PERPLEXITY_API_KEY || process.env.PERPLEXITY_API_KEY) &&
@@ -125,11 +162,23 @@ export async function getBestAvailableAIModel(
 			return { type: 'claude', client };
 		} catch (error) {
 			log.error(`Claude not available: ${error.message}`);
+			
+			// Try DeepSeek as last resort for research
+			if (session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY) {
+				try {
+					log.warn('Trying DeepSeek for research as last resort');
+					const client = await getDeepSeekClientForMCP(session, log);
+					return { type: 'deepseek', client };
+				} catch (deepseekError) {
+					log.error(`DeepSeek not available: ${deepseekError.message}`);
+				}
+			}
+			
 			throw new Error('No AI models available for research');
 		}
 	}
 
-	// Regular path: Perplexity for research when available
+	// Case 2: Regular path - Perplexity for research when available
 	if (
 		requiresResearch &&
 		(session?.env?.PERPLEXITY_API_KEY || process.env.PERPLEXITY_API_KEY)
@@ -139,11 +188,26 @@ export async function getBestAvailableAIModel(
 			return { type: 'perplexity', client };
 		} catch (error) {
 			log.warn(`Perplexity not available: ${error.message}`);
-			// Fall through to Claude as backup
+			// Fall through to Claude or DeepSeek as backup
 		}
 	}
 
-	// Test case: Claude for overloaded scenario
+	// Case 3: Claude is overloaded, try DeepSeek
+	if (
+		claudeOverloaded &&
+		(session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY)
+	) {
+		try {
+			log.info('Claude is overloaded, trying DeepSeek');
+			const client = await getDeepSeekClientForMCP(session, log);
+			return { type: 'deepseek', client };
+		} catch (error) {
+			log.warn(`DeepSeek not available: ${error.message}`);
+			// Fall through to check other options
+		}
+	}
+
+	// Case 4: Claude for overloaded scenario as last resort
 	if (
 		claudeOverloaded &&
 		(session?.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY)
@@ -162,7 +226,7 @@ export async function getBestAvailableAIModel(
 		}
 	}
 
-	// Default case: Use Claude when available and not overloaded
+	// Case 5: Default - Use Claude when available and not overloaded
 	if (
 		!claudeOverloaded &&
 		(session?.env?.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY)
@@ -172,7 +236,19 @@ export async function getBestAvailableAIModel(
 			return { type: 'claude', client };
 		} catch (error) {
 			log.warn(`Claude not available: ${error.message}`);
-			// Fall through to error if no other options
+			// Fall through to try DeepSeek
+		}
+	}
+	
+	// Case 6: DeepSeek as fallback when Claude is not available
+	if (session?.env?.DEEPSEEK_API_KEY || process.env.DEEPSEEK_API_KEY) {
+		try {
+			log.info('Claude not available, using DeepSeek');
+			const client = await getDeepSeekClientForMCP(session, log);
+			return { type: 'deepseek', client };
+		} catch (error) {
+			log.error(`DeepSeek not available: ${error.message}`);
+			// Fall through to error
 		}
 	}
 

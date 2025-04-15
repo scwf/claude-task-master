@@ -11,7 +11,7 @@ A task management system for AI-driven development with Claude, designed to work
 
 ## Requirements
 
-- Anthropic API key (Claude API)
+- LLM API key (支持 Claude API, DeepSeek API)
 - OpenAI SDK (for Perplexity API integration, optional)
 
 ## Quick Start
@@ -37,8 +37,11 @@ npm i -g task-master-ai
 			"env": {
 				"ANTHROPIC_API_KEY": "YOUR_ANTHROPIC_API_KEY_HERE",
 				"PERPLEXITY_API_KEY": "YOUR_PERPLEXITY_API_KEY_HERE",
-				"MODEL": "claude-3-7-sonnet-20250219",
+				"DEEPSEEK_API_KEY": "YOUR_DEEPSEEK_API_KEY_HERE",
+				"LLM_PROVIDER": "deepseek",
+				"ANTHROPIC_MODEL": "claude-3-7-sonnet-20250219",
 				"PERPLEXITY_MODEL": "sonar-pro",
+				"DEEPSEEK_MODEL": "deepseek-chat",
 				"MAX_TOKENS": 64000,
 				"TEMPERATURE": 0.2,
 				"DEFAULT_SUBTASKS": 5,
@@ -89,6 +92,27 @@ npx task-master-init
 ```
 
 This will prompt you for project details and set up a new project with the necessary files and structure.
+
+#### 配置环境变量
+
+在项目根目录创建 `.env` 文件：
+
+```ini
+# API Keys (Required)
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+PERPLEXITY_API_KEY=your_perplexity_api_key_here
+
+# LLM提供商设置
+LLM_PROVIDER=deepseek
+
+# 模型配置
+ANTHROPIC_MODEL=claude-3-7-sonnet-20250219
+DEEPSEEK_MODEL=deepseek-chat
+PERPLEXITY_MODEL=sonar-pro
+MAX_TOKENS=64000
+TEMPERATURE=0.2
+```
 
 #### Common Commands
 
