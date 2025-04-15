@@ -59,6 +59,25 @@ function getPerplexityClient() {
 function getAvailableAIModel(options = {}) {
 	const { claudeOverloaded = false, requiresResearch = false } = options;
 
+	// 检查LLM提供商设置
+	const llmProvider = process.env.LLM_PROVIDER || 'anthropic';
+	
+	// 如果提供商是DeepSeek，优先使用DeepSeek
+	if (llmProvider === 'deepseek' && process.env.DEEPSEEK_API_KEY) {
+		try {
+			// 使用已经在顶部导入的 OpenAI 类
+			const client = new OpenAI({
+				apiKey: process.env.DEEPSEEK_API_KEY,
+				baseURL: 'https://api.deepseek.com'
+			});
+			log('info', '使用DeepSeek AI进行任务处理');
+			return { type: 'deepseek', client };
+		} catch (error) {
+			log('warn', `DeepSeek不可用: ${error.message}`);
+			// 如果DeepSeek初始化失败，尝试其他模型
+		}
+	}
+
 	// First choice: Perplexity if research is required and it's available
 	if (requiresResearch && process.env.PERPLEXITY_API_KEY) {
 		try {
@@ -86,6 +105,22 @@ function getAvailableAIModel(options = {}) {
 			// Fall through to Claude anyway with warning
 		}
 	}
+	
+	// 如果没有指定优先使用DeepSeek但它可用，也可以作为备选
+	if (process.env.DEEPSEEK_API_KEY) {
+		try {
+			// 使用已经在顶部导入的 OpenAI 类
+			const client = new OpenAI({
+				apiKey: process.env.DEEPSEEK_API_KEY,
+				baseURL: 'https://api.deepseek.com'
+			});
+			log('info', 'Claude不可用或过载，回退到DeepSeek');
+			return { type: 'deepseek', client };
+		} catch (error) {
+			log('warn', `DeepSeek备选不可用: ${error.message}`);
+			// 如果DeepSeek初始化失败，继续尝试其他模型
+		}
+	}
 
 	// Last resort: Use Claude even if overloaded (might fail)
 	if (process.env.ANTHROPIC_API_KEY) {
@@ -100,7 +135,7 @@ function getAvailableAIModel(options = {}) {
 
 	// No models available
 	throw new Error(
-		'No AI models available. Please set ANTHROPIC_API_KEY and/or PERPLEXITY_API_KEY.'
+		'无可用的AI模型。请设置ANTHROPIC_API_KEY、DEEPSEEK_API_KEY或PERPLEXITY_API_KEY中的至少一个。'
 	);
 }
 
@@ -1520,22 +1555,24 @@ function getConfiguredAnthropicClient(session = null, customEnv = null) {
 
 /**
  * Send a chat request to Claude with context management
- * @param {Object} client - Anthropic client
+ * @param {Object} client - AI客户端实例 (Anthropic, OpenAI等)
  * @param {Object} params - Chat parameters
  * @param {Object} options - Options containing reportProgress, mcpLog, silentMode, and session
+ * @param {string} [modelType='unknown'] - 模型类型标识
  * @returns {string} - Response text
  */
 async function sendChatWithContext(
 	client,
 	params,
-	{ reportProgress, mcpLog, silentMode, session } = {}
+	{ reportProgress, mcpLog, silentMode, session } = {},
+	modelType = 'unknown'
 ) {
-	// Use the streaming helper to get the response
-	return await _handleAnthropicStream(
+	// 使用通用流处理器来处理请求，支持多种模型类型
+	return await handleAIModelStream(
 		client,
 		params,
-		{ reportProgress, mcpLog, silentMode },
-		false
+		{ reportProgress, mcpLog, silentMode, session },
+		modelType
 	);
 }
 
@@ -1573,24 +1610,179 @@ function parseTasksFromCompletion(completionText) {
 	}
 }
 
+/**
+ * 处理多种AI模型的流式请求
+ * @param {Object} client - AI客户端实例 (Anthropic, OpenAI等)
+ * @param {Object} params - 请求参数
+ * @param {Object} options - 选项
+ * @param {boolean} [options.silentMode=false] - 是否使用静默模式
+ * @param {Function} [options.reportProgress] - 进度报告函数
+ * @param {Object} [options.mcpLog] - MCP日志对象
+ * @param {Object} [options.session] - 会话对象
+ * @param {string} [modelType='unknown'] - 模型类型标识
+ * @returns {Promise<string>} 完整的响应文本
+ */
+export async function handleAIModelStream(
+	client,
+	params,
+	options = {},
+	modelType = 'unknown'
+) {
+	const { silentMode = false, reportProgress, mcpLog } = options;
+	
+	// 用于日志记录的辅助函数
+	const report = (message, level = 'info') => {
+		if (mcpLog && typeof mcpLog[level] === 'function') {
+			mcpLog[level](message);
+		} else if (!silentMode) {
+			log(level, message);
+		}
+	};
+	
+	// 记录客户端信息，帮助调试
+	report(`处理AI流式请求，模型类型: ${modelType}`, 'info');
+	report(`客户端类型: ${client ? (client.constructor ? client.constructor.name : '未知') : '未定义'}`, 'info');
+	
+	if (!client) {
+		const error = new Error('AI客户端对象为空');
+		report(error.message, 'error');
+		throw error;
+	}
+	
+	// 检测客户端类型
+	let detectedModelType = modelType;
+	
+	// 如果模型类型是unknown，尝试自动检测
+	if (modelType === 'unknown') {
+		if (client.constructor && client.constructor.name.toLowerCase().includes('anthropic')) {
+			detectedModelType = 'claude';
+			report('自动检测到Anthropic/Claude客户端', 'info');
+		} else if (client.baseURL) {
+			if (client.baseURL.includes('deepseek')) {
+				detectedModelType = 'deepseek';
+				report('自动检测到DeepSeek客户端', 'info');
+			} else if (client.baseURL.includes('perplexity')) {
+				detectedModelType = 'perplexity';
+				report('自动检测到Perplexity客户端', 'info');
+			} else {
+				detectedModelType = 'openai-compatible';
+				report(`自动检测到OpenAI兼容客户端，baseURL: ${client.baseURL}`, 'info');
+			}
+		} else {
+			report('无法自动检测客户端类型，将使用默认处理方式', 'warn');
+		}
+	}
+	
+	try {
+		// 根据模型类型选择不同的处理逻辑
+		if (detectedModelType === 'claude') {
+			// Claude/Anthropic处理逻辑
+			report('使用Anthropic处理流', 'info');
+			return await _handleAnthropicStream(client, params, options);
+		} else {
+			// DeepSeek、Perplexity和其他OpenAI兼容处理逻辑
+			report(`使用OpenAI兼容处理流 (${detectedModelType})`, 'info');
+			
+			// 检查客户端结构
+			if (!client.chat || !client.chat.completions) {
+				throw new Error(`${detectedModelType}客户端缺少必要的chat.completions结构`);
+			}
+			
+			if (typeof client.chat.completions.create !== 'function') {
+				throw new Error(`${detectedModelType}客户端缺少必要的chat.completions.create方法`);
+			}
+			
+			return await _handleOpenAICompatibleStream(client, params, options);
+		}
+	} catch (error) {
+		report(`处理AI流失败: ${error.message}`, 'error');
+		throw new Error(`${detectedModelType}流处理错误: ${error.message}`);
+	}
+}
+
+/**
+ * 处理兼容OpenAI API的流式请求
+ * @param {Object} client - OpenAI兼容的客户端实例
+ * @param {Object} params - 请求参数
+ * @param {Object} options - 选项
+ * @returns {Promise<string>} 完整的响应文本
+ */
+async function _handleOpenAICompatibleStream(
+	client,
+	params,
+	{ reportProgress, mcpLog, silentMode } = {}
+) {
+	const report = (message, level = 'info') => {
+		if (reportProgress && typeof reportProgress === 'function') {
+			reportProgress(message);
+		}
+		if (mcpLog && typeof mcpLog[level] === 'function') {
+			mcpLog[level](message);
+		}
+	};
+
+	try {
+		// 准备请求参数 - 转换成OpenAI兼容格式
+		let openaiParams = {
+			model: params.model,
+			temperature: params.temperature,
+			max_tokens: params.max_tokens || params.maxTokens,
+			stream: true,
+			messages: params.messages
+		};
+		
+		// 如果有system参数，将其添加到messages首位
+		if (params.system) {
+			openaiParams.messages.unshift({ 
+				role: 'system', 
+				content: params.system 
+			});
+		}
+		
+		report('发送请求到AI服务...');
+		
+		// 检查client是否有正确的chat.completions结构
+		if (!client.chat || !client.chat.completions || typeof client.chat.completions.create !== 'function') {
+			throw new Error('无效的API客户端：缺少chat.completions.create方法。请检查客户端初始化是否正确。');
+		}
+		
+		// 创建流式请求
+		const stream = await client.chat.completions.create(openaiParams);
+		
+		// 收集响应
+		let fullContent = '';
+		for await (const chunk of stream) {
+			const content = chunk.choices[0]?.delta?.content || '';
+			if (content) {
+				fullContent += content;
+				if (reportProgress) {
+					reportProgress('接收数据中...');
+				}
+			}
+		}
+		
+		report('完成接收AI响应');
+		return fullContent;
+	} catch (error) {
+		report(`API请求失败: ${error.message}`, 'error');
+		throw error;
+	}
+}
+
 // Export AI service functions
 export {
-	getAnthropicClient,
-	getPerplexityClient,
 	callClaude,
-	handleStreamingRequest,
-	processClaudeResponse,
+	parseTaskJsonResponse,
+	getAvailableAIModel,
+	handleClaudeError,
+	_handleAnthropicStream,
+	_buildAddTaskPrompt,
 	generateSubtasks,
 	generateSubtasksWithPerplexity,
-	generateTaskDescriptionWithPerplexity,
-	parseSubtasksFromText,
 	generateComplexityAnalysisPrompt,
-	handleClaudeError,
-	getAvailableAIModel,
-	parseTaskJsonResponse,
-	_buildAddTaskPrompt,
-	_handleAnthropicStream,
+	parseSubtasksFromText,
 	getConfiguredAnthropicClient,
 	sendChatWithContext,
-	parseTasksFromCompletion
+	parseTasksFromCompletion,
+	generateTaskDescriptionWithPerplexity
 };

@@ -10,12 +10,14 @@ import {
 } from '../../../../scripts/modules/utils.js';
 import {
 	getAnthropicClientForMCP,
+	getBestAvailableAIModel,
 	getModelConfig
 } from '../utils/ai-client-utils.js';
 import {
 	_buildAddTaskPrompt,
 	parseTaskJsonResponse,
-	_handleAnthropicStream
+	_handleAnthropicStream,
+	handleAIModelStream
 } from '../../../../scripts/modules/ai-services.js';
 
 /**
@@ -141,15 +143,19 @@ export async function addTaskDirect(args, log, context = {}) {
 			// Initialize AI client with session environment
 			let localAnthropic;
 			try {
-				localAnthropic = getAnthropicClientForMCP(session, log);
+				// 使用getBestAvailableAIModel替代直接获取Anthropic客户端
+				const selectedModel = await getBestAvailableAIModel(session, {}, log);
+				localAnthropic = selectedModel.client;
+				
+				log.info(`使用AI提供商: ${selectedModel.type}`);
 			} catch (error) {
-				log.error(`Failed to initialize Anthropic client: ${error.message}`);
+				log.error(`无法初始化AI客户端: ${error.message}`);
 				disableSilentMode();
 				return {
 					success: false,
 					error: {
 						code: 'AI_CLIENT_ERROR',
-						message: `Cannot initialize AI client: ${error.message}`
+						message: `无法初始化AI客户端: ${error.message}`
 					}
 				};
 			}
@@ -176,7 +182,8 @@ export async function addTaskDirect(args, log, context = {}) {
 			// Make the AI call using the streaming helper
 			let responseText;
 			try {
-				responseText = await _handleAnthropicStream(
+				const selectedModelType = modelConfig.llmProvider; // 获取模型类型
+				responseText = await handleAIModelStream(
 					localAnthropic,
 					{
 						model: modelConfig.model,
@@ -186,17 +193,19 @@ export async function addTaskDirect(args, log, context = {}) {
 						system: systemPrompt
 					},
 					{
-						mcpLog: log
-					}
+						mcpLog: log,
+						session
+					},
+					selectedModelType
 				);
 			} catch (error) {
-				log.error(`AI processing failed: ${error.message}`);
+				log.error(`AI处理失败: ${error.message}`);
 				disableSilentMode();
 				return {
 					success: false,
 					error: {
 						code: 'AI_PROCESSING_ERROR',
-						message: `Failed to generate task with AI: ${error.message}`
+						message: `AI生成任务失败: ${error.message}`
 					}
 				};
 			}

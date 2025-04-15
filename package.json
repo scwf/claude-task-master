@@ -20,7 +20,6 @@
 		"release": "changeset publish",
 		"inspector": "npx @modelcontextprotocol/inspector node mcp-server/server.js",
 		"mcp-server": "node mcp-server/server.js",
-		"start-mcp": "node start-mcp.js",
 		"test:deepseek": "node test-deepseek.js",
 		"format-check": "prettier --check .",
 		"format": "prettier --write ."

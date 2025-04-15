@@ -110,10 +110,18 @@ export async function getDeepSeekClientForMCP(session, log = console) {
 		const { default: OpenAI } = await import('openai');
 
 		// Initialize and return a new OpenAI client configured for DeepSeek
-		return new OpenAI({
+		const client = new OpenAI({
 			apiKey,
 			baseURL: 'https://api.deepseek.com'
 		});
+		
+		// 验证客户端结构正确
+		if (!client.chat || !client.chat.completions || typeof client.chat.completions.create !== 'function') {
+			log.error('DeepSeek客户端初始化错误：客户端缺少必要的chat.completions.create方法');
+			throw new Error('DeepSeek客户端结构不符合要求');
+		}
+		
+		return client;
 	} catch (error) {
 		log.error(`Failed to initialize DeepSeek client: ${error.message}`);
 		throw error;

@@ -10,7 +10,9 @@ import {
 } from '../../../../scripts/modules/utils.js';
 import {
 	getAnthropicClientForMCP,
-	getPerplexityClientForMCP
+	getPerplexityClientForMCP,
+	getBestAvailableAIModel,
+	getModelConfig
 } from '../utils/ai-client-utils.js';
 
 /**
@@ -96,19 +98,32 @@ export async function updateTaskByIdDirect(args, log, context = {}) {
 		let aiClient;
 		try {
 			if (useResearch) {
-				log.info('Using Perplexity AI for research-backed task update');
+				log.info('使用Perplexity AI进行研究支持的任务更新');
 				aiClient = await getPerplexityClientForMCP(session, log);
 			} else {
-				log.info('Using Claude AI for task update');
-				aiClient = getAnthropicClientForMCP(session, log);
+				// 根据LLM_PROVIDER配置选择最佳模型
+				const modelConfig = getModelConfig(session);
+				log.info(`使用${modelConfig.llmProvider}模型进行任务更新`);
+				log.info(`当前环境变量: LLM_PROVIDER=${process.env.LLM_PROVIDER}, DEEPSEEK_API_KEY=${process.env.DEEPSEEK_API_KEY ? '已设置' : '未设置'}`);
+				
+				log.info('调用getBestAvailableAIModel前...');
+				const selectedModel = await getBestAvailableAIModel(session, {}, log);
+				log.info(`getBestAvailableAIModel返回结果: 模型类型=${selectedModel.type}`);
+				log.info(`客户端类型: ${selectedModel.client ? selectedModel.client.constructor.name : 'undefined'}`);
+				if (selectedModel.client && selectedModel.client.baseURL) {
+					log.info(`客户端baseURL: ${selectedModel.client.baseURL}`);
+				}
+				
+				aiClient = selectedModel.client;
+				log.info(`选择的AI提供商: ${selectedModel.type}`);
 			}
 		} catch (error) {
-			log.error(`Failed to initialize AI client: ${error.message}`);
+			log.error(`无法初始化AI客户端: ${error.message}`);
 			return {
 				success: false,
 				error: {
 					code: 'AI_CLIENT_ERROR',
-					message: `Cannot initialize AI client: ${error.message}`
+					message: `无法初始化AI客户端: ${error.message}`
 				},
 				fromCache: false
 			};
